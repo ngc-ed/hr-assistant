@@ -115,7 +115,7 @@ def test_invalid_api_key_shows_error_401(page: Page) -> None:
 
 
 def test_rate_limit_shows_error_429_with_retry_after(page: Page) -> None:
-    """Exceder límite de peticiones muestra «Demasiadas preguntas; espera N segundos»."""
+    """Un 429 muestra «Demasiadas preguntas; espera N segundos»."""
     retry_after_seconds = 7
 
     def reply_with_rate_limit(route: Route) -> None:

@@ -16,7 +16,8 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
       - name: Ejecutar pylint
-        run: pylint --max-line-length=88 app tests e2e
+        # Mismas opciones que verification/qa.py
+        run: pylint app tests e2e --max-line-length=88 --fail-under=10 --disable=missing-function-docstring,redefined-outer-name,too-few-public-methods
 
   unit:
     needs: style
