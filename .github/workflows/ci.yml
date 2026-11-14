@@ -30,7 +30,8 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements.txt
       - name: Ejecutar pruebas unitarias con cobertura
-        run: pytest tests/ -v --cov=app --cov-report=term-missing --cov-fail-under=80
+        # python -m agrega el directorio actual a sys.path (import app)
+        run: python -m pytest tests/ -v --cov=app --cov-report=term-missing --cov-fail-under=80
 
   e2e:
     needs: unit
@@ -62,7 +63,7 @@ jobs:
       - name: Ejecutar pruebas e2e
         env:
           E2E_API_KEY: "clave-de-ejemplo-e2e-0123456789"
-        run: pytest e2e/ -v --base-url http://127.0.0.1:8000
+        run: python -m pytest e2e/ -v --base-url http://127.0.0.1:8000
 
   docker:
     needs: e2e
