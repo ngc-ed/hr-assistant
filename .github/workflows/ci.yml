@@ -1,0 +1,72 @@
+# Las rutas parten de la raíz del repositorio publicado (product/ es esa raíz).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Ejecutar pylint
+        run: pylint --max-line-length=88 app tests e2e
+
+  unit:
+    needs: style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Ejecutar pruebas unitarias con cobertura
+        run: pytest tests/ -v --cov=app --cov-report=term-missing --cov-fail-under=80
+
+  e2e:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Instalar navegador Playwright
+        run: python -m playwright install --with-deps chromium
+      - name: Iniciar aplicación
+        # Clave de ejemplo, no real: el servidor la exige y las pruebas
+        # la mandan en E2E_API_KEY. El límite alto evita 429 en las pruebas.
+        env:
+          MODEL_PROVIDER: fake
+          API_KEYS: "e2e:clave-de-ejemplo-e2e-0123456789"
+          RATE_LIMIT_PER_MINUTE: "1000"
+        run: |
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          # Esperar a que el servidor responda en /health
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8000/health
+      - name: Ejecutar pruebas e2e
+        env:
+          E2E_API_KEY: "clave-de-ejemplo-e2e-0123456789"
+        run: pytest e2e/ -v --base-url http://127.0.0.1:8000
+
+  docker:
+    needs: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Construir imagen Docker
+        run: docker build -t hr-assistant:latest .

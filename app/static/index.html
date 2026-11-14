@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HR Assistant</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 720px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      color: #222;
+    }
+    h1 { font-size: 1.5rem; }
+    #conversation {
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      padding: 1rem;
+      min-height: 200px;
+      margin-bottom: 1rem;
+    }
+    .turn { margin-bottom: 0.75rem; white-space: pre-wrap; }
+    .user { font-weight: bold; }
+    .assistant { color: #1a4d8f; }
+    .tools { font-size: 0.85rem; color: #666; }
+    .error { color: #b00020; }
+    .request-id { font-size: 0.75rem; color: #888; }
+    .cost { font-size: 0.75rem; color: #555; }
+    form { display: flex; gap: 0.5rem; }
+    input { flex: 1; padding: 0.5rem; }
+    button { padding: 0.5rem 1rem; }
+  </style>
+</head>
+<body>
+  <h1>HR Assistant</h1>
+  <div id="conversation" data-testid="answer" aria-live="polite"></div>
+  <form id="ask-form">
+    <input id="api-key" data-testid="api-key" type="password"
+           placeholder="Clave de acceso" autocomplete="off">
+    <input id="question" data-testid="question" type="text"
+           placeholder="Ejemplo: ¿Quién es EMP-0004?" autocomplete="off">
+    <button id="send" data-testid="send" type="submit">Enviar</button>
+  </form>
+  <template id="request-id-template">
+    <div class="turn request-id" data-testid="request-id"></div>
+  </template>
+  <template id="error-template">
+    <div class="turn error" data-testid="error"></div>
+  </template>
+  <template id="cost-template">
+    <div class="turn cost" data-testid="cost"></div>
+  </template>
+  <script>
+    // El historial vive solo en la memoria del navegador (la API no lo guarda).
+    const history = [];
+    const conversation = document.getElementById("conversation");
+    const form = document.getElementById("ask-form");
+    const input = document.getElementById("question");
+    const button = document.getElementById("send");
+    const keyInput = document.getElementById("api-key");
+    const KEY_STORAGE_NAME = "hr-assistant-api-key";
+
+    // La clave vive solo en sessionStorage (se borra al cerrar la pestaña).
+    keyInput.value = sessionStorage.getItem(KEY_STORAGE_NAME) || "";
+    keyInput.addEventListener("input", () => {
+      sessionStorage.setItem(KEY_STORAGE_NAME, keyInput.value.trim());
+    });
+
+    // Arma el mensaje de error de un 401, un 429 o de otro estado.
+    function statusMessage(response) {
+      if (response.status === 401) {
+        return "Clave inválida";
+      }
+      if (response.status === 429) {
+        const seconds = response.headers.get("Retry-After") || "unos";
+        return "Demasiadas preguntas; espera " + seconds + " segundos";
+      }
+      if (response.status === 422) {
+        return "La pregunta no es válida (vacía o demasiado larga).";
+      }
+      if (response.status === 502) {
+        return "El modelo no está disponible. Intenta más tarde.";
+      }
+      return "El asistente respondió con un error (" + response.status + ").";
+    }
+
+    // Agrega una línea a la conversación usando solo textContent.
+    function addLine(text, className) {
+      const line = document.createElement("div");
+      line.className = "turn " + className;
+      line.textContent = text;
+      conversation.appendChild(line);
+      return line;
+    }
+
+    // Clona la plantilla indicada, le pone el texto con textContent y la agrega.
+    function addFromTemplate(templateId, text) {
+      const template = document.getElementById(templateId);
+      const line = template.content.firstElementChild.cloneNode(false);
+      line.textContent = text;
+      conversation.appendChild(line);
+      return line;
+    }
+
+    // Muestra un mensaje de error (con data-testid="error").
+    function addError(text) {
+      return addFromTemplate("error-template", text);
+    }
+
+    // Muestra el modelo y el costo de la respuesta, tomados del cuerpo de /ask.
+    function addCost(data) {
+      const model = data.model || "desconocido";
+      const cost = typeof data.cost_usd === "number" ? data.cost_usd : 0;
+      addFromTemplate("cost-template",
+        "Modelo: " + model + " · Costo: " + cost + " USD");
+    }
+
+    // Muestra el request_id para que la persona lo pase a soporte.
+    function addRequestId(requestId) {
+      if (!requestId) {
+        return;
+      }
+      addFromTemplate("request-id-template", "Id de la petición: " + requestId);
+    }
+
+    // En errores, el id viene en el cuerpo o, si no, en el encabezado X-Request-ID.
+    async function errorRequestId(response) {
+      try {
+        const body = await response.json();
+        if (body && body.request_id) {
+          return body.request_id;
+        }
+      } catch (error) {
+        // El cuerpo no era JSON: se usa el encabezado.
+      }
+      return response.headers.get("X-Request-ID");
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const question = input.value.trim();
+      if (!question) {
+        addError("Escribe una pregunta antes de enviar.");
+        return;
+      }
+      addLine("Tú: " + question, "user");
+      input.value = "";
+      button.disabled = true;
+      try {
+        const response = await fetch("/ask", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": keyInput.value.trim(),
+          },
+          body: JSON.stringify({ question: question, history: history }),
+        });
+        if (!response.ok) {
+          addError(statusMessage(response));
+          addRequestId(await errorRequestId(response));
+          return;
+        }
+        const data = await response.json();
+        addLine("Asistente: " + data.answer, "assistant");
+        const tools = data.tools_used.length
+          ? data.tools_used.join(", ")
+          : "ninguna";
+        addLine("Herramientas usadas: " + tools, "tools");
+        addCost(data);
+        addRequestId(data.request_id);
+        history.push({ role: "user", content: question });
+        history.push({ role: "assistant", content: data.answer });
+      } catch (error) {
+        addError("No se pudo conectar con el asistente. Intenta de nuevo.");
+      } finally {
+        button.disabled = false;
+        input.focus();
+      }
+    });
+  </script>
+</body>
+</html>

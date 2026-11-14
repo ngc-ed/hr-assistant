@@ -1,0 +1,47 @@
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Pruebas
+tests/
+e2e/
+
+# Cachés de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Cachés de pytest y mypy
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Archivos de editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentación
+README.md
+doc/
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Otros
+.env.example
