@@ -150,7 +150,8 @@ def answer_cost_positive(context):
 def first_call_messages(context, count):
     first_call = context["model"].calls[0]
     assert len(first_call) == count
-    assert first_call[0]["content"] == "mensaje 4"
+    assert first_call[0]["role"] == "system"
+    assert first_call[1]["content"] == "mensaje 4"
     assert first_call[-1]["content"] == "¿Quién es EMP-0004?"
 
 

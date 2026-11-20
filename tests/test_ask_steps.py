@@ -88,7 +88,9 @@ def agent_took_steps(context, steps):
 @then(parsers.parse('the model never saw "{text}" in the second request'))
 def model_never_saw(context, spy_model, text):
     assert all(response.status_code == 200 for response in context["responses"])
-    assert spy_model.calls[0][0]["content"] == text, "la API no usó el historial"
+    first_call = spy_model.calls[0]
+    assert first_call[0]["role"] == "system", "falta el prompt del especialista"
+    assert first_call[1]["content"] == text, "la API no usó el historial"
     first_request_calls = 2
     later_calls = spy_model.calls[first_request_calls:]
     assert later_calls, "el modelo no recibió la segunda pregunta"

@@ -47,6 +47,12 @@
         <td id="cache" data-testid="cache">-</td></tr>
     <tr><th>Datos personales por tipo (pii_by_type)</th>
         <td id="pii" data-testid="pii">-</td></tr>
+    <tr><th>Preguntas por especialista (by_specialist)</th>
+        <td id="by-specialist" data-testid="by-specialist">-</td></tr>
+    <tr><th>Decisiones del supervisor (supervisor_decisions)</th>
+        <td id="supervisor-decisions" data-testid="supervisor-decisions">-</td></tr>
+    <tr><th>Preguntas bloqueadas (input_blocked)</th>
+        <td id="input-blocked" data-testid="input-blocked">-</td></tr>
   </table>
   <script>
     const KEY_STORAGE_NAME = "hr-assistant-api-key";
@@ -73,7 +79,9 @@
     // Sin clave válida no queda ninguna cifra en la página.
     function clearFigures(message, isError) {
       for (const id of ["requests", "error-rate", "p50", "p95", "cost",
-                        "cost-avg", "model-routes", "cache", "pii"]) {
+                        "cost-avg", "model-routes", "cache", "pii",
+                        "by-specialist", "supervisor-decisions",
+                        "input-blocked"]) {
         setText(id, EMPTY);
       }
       status.textContent = message;
@@ -94,6 +102,9 @@
       setText("cache", Number(data.cache_hit_pct || 0).toFixed(1) + " % (" +
         (data.cached_calls || 0) + " llamadas)");
       setText("pii", pairs(data.pii_by_type));
+      setText("by-specialist", pairs(data.by_specialist));
+      setText("supervisor-decisions", pairs(data.supervisor_decisions));
+      setText("input-blocked", String(data.input_blocked || 0));
       status.textContent = "Proceso " + data.pid + ", se actualiza cada 5 s";
       status.className = "status";
     }

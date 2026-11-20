@@ -81,18 +81,33 @@ class Agent:
     :type directory: EmployeeDirectory
     :param max_steps: Tope de vueltas del bucle
     :type max_steps: int
+    :param system_prompt: Prompt de sistema del especialista; opcional
+    :type system_prompt: str | None
+    :param allowed_tools: Herramientas que puede usar; ``None`` permite todas
+    :type allowed_tools: tuple[str, ...] | None
     """
 
-    def __init__(
-        self, model: LanguageModel, directory: EmployeeDirectory, max_steps: int
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        model: LanguageModel,
+        directory: EmployeeDirectory,
+        max_steps: int,
+        system_prompt: str | None = None,
+        allowed_tools: tuple[str, ...] | None = None,
     ):
         self._model = model
         self._directory = directory
         self._max_steps = max_steps
-        self._tools = {
+        self._system_prompt = system_prompt
+        tools = {
             "get_employee": _Tool(self._get_employee, "employee_id"),
             "search_by_department": _Tool(self._search_by_department, "department"),
         }
+        if allowed_tools is not None:
+            tools = {
+                name: tool for name, tool in tools.items() if name in allowed_tools
+            }
+        self._tools = tools
 
     @traceable(run_type="chain", name="agent_run")
     def run(
@@ -113,9 +128,12 @@ class Agent:
         :return: La respuesta y sus métricas
         :rtype: AgentResult
         """
-        messages = [
+        messages = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.extend(
             {"role": item["role"], "content": item["content"]} for item in history
-        ]
+        )
         messages.append({"role": "user", "content": question})
         result = AgentResult(
             answer=STEP_CAP_ANSWER, steps=self._max_steps, stopped=True

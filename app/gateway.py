@@ -162,14 +162,17 @@ class GatewayModel:
         return headers
 
     def _body(self, messages: list[dict]) -> dict:
-        """Arma el cuerpo con el mensaje ``system`` antepuesto y las palancas.
+        """Arma el cuerpo con un mensaje ``system`` y las palancas.
 
         :param messages: Mensajes con ``role`` y ``content``
         :type messages: list[dict]
         :return: Cuerpo JSON de la petición
         :rtype: dict
         """
-        conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
+        conversation = []
+        # Si el especialista ya trae su ``system``, no se antepone el general.
+        if not messages or messages[0].get("role") != "system":
+            conversation.append({"role": "system", "content": SYSTEM_PROMPT})
         conversation.extend(
             {"role": item["role"], "content": item["content"]} for item in messages
         )

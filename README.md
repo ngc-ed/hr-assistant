@@ -1,8 +1,16 @@
 # HR Assistant
 
-Asistente de Recursos Humanos: una API web sin estado (FastAPI) con un agente que
-responde preguntas sobre el directorio de empleados usando dos herramientas de solo
-lectura (`get_employee` y `search_by_department`). Incluye una página web sencilla.
+Asistente de Recursos Humanos: una API web sin estado (FastAPI) que responde
+preguntas sobre el directorio de empleados con un pipeline de cuatro etapas:
+
+1. **Guardián**: filtra la entrada y bloquea las preguntas con inyección.
+2. **Supervisor**: elige al especialista.
+3. **Especialista**: `employee` (herramienta `get_employee`) o `department`
+   (herramienta `search_by_department`); ambas son de solo lectura.
+4. **Revisor**: valida la respuesta antes de devolverla.
+
+Ver [ADR 0017](doc/adr/0017-multiagent-pipeline.md) y
+[ADR 0018](doc/adr/0018-input-guard.md). Incluye una página web sencilla.
 
 Cada petición se puede rastrear: lleva un `request_id`, deja un log JSON por evento
 en la salida estándar y suma a las métricas del proceso. Opcionalmente, el agente
@@ -32,7 +40,7 @@ Luego abre `http://127.0.0.1:8000/` en el navegador.
 | --- | --- |
 | `GET /` | La página web; bajo cada respuesta muestra el id de la petición |
 | `GET /health` | `{"status": "ok", "pid": ...}` |
-| `POST /ask` (pide `X-API-Key`) | Recibe `{"question", "history"}`; responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd` |
+| `POST /ask` (pide `X-API-Key`) | Recibe `{"question", "history"}`; responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls`, `cost_usd`, `specialist` (`employee` o `department`) y `agents` (etapas que corrieron, por ejemplo `["guard", "supervisor", "employee", "reviewer"]`). Responde `400` si el guardián (`app/input_guard.py`, ADR 0018) bloquea una pregunta con inyección y `422` si la pregunta pasa de `MAX_QUESTION_CHARS` |
 | `GET /dashboard` | El tablero: HTML sin cifras y sin clave; no pide `X-API-Key` |
 | `GET /metrics` (pide `X-API-Key`) | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`), `cost_usd` acumulado y las métricas de negocio (ver abajo) |
 
@@ -42,7 +50,8 @@ Luego abre `http://127.0.0.1:8000/` en el navegador.
 URL. La página pide la clave, la guarda en `sessionStorage` (la misma de la página
 principal) y lee `/metrics` cada 5 segundos con `X-API-Key`. Muestra peticiones,
 `error_rate`, p50 y p95 contra el SLO, costo acumulado y promedio por petición,
-rutas de modelo, llamadas con caché y PII por tipo. Sin clave válida no muestra
+rutas de modelo, llamadas con caché, PII por tipo, preguntas por especialista,
+decisiones del supervisor y preguntas bloqueadas. Sin clave válida no muestra
 cifras, y la clave nunca va en el código de la página.
 
 **`/metrics` es por proceso.** Con varios workers de uvicorn (`WEB_CONCURRENCY`),
@@ -54,7 +63,14 @@ pregunta o detectó PII): `questions_by_department` (nombre a número), `tool_us
 `pii_by_type` (`CORREO`, `RFC`... a número), y para el tablero `model_routes`,
 `cached_calls` y `cost_per_request_usd`.
 
-Con `LANGSMITH_TRACING=true`, cada traza lleva los metadatos `request_id`, `client`,
+Métricas del pipeline multiagente (aparecen cuando el proceso ya eligió un
+especialista o bloqueó una pregunta): `by_specialist` (`employee` o `department` a
+número), `supervisor_decisions` (`rules` o `model` a número) e `input_blocked`
+(preguntas que cortó el guardián). El tablero también las muestra.
+
+Con `LANGSMITH_TRACING=true`, cada petición es un run `request` con un run por
+etapa: `agent.guard`, `agent.supervisor`, `agent.employee` o `agent.department`, y
+`agent.reviewer`. Cada traza lleva los metadatos `request_id`, `client`,
 `route`, `model` y `cost_usd`; con `HIDE_INPUTS` y `HIDE_OUTPUTS` en `true` no va el
 texto de la pregunta ni de la respuesta.
 
@@ -174,12 +190,16 @@ Una línea JSON por evento con `ts` (UTC), `service`, `event` y `request_id`:
 - `agent_run`: `question_chars`, `history_messages`, `history_sent`, `steps`,
   `tools`, `input_tokens`, `output_tokens`, `stopped`, `model`, `route`,
   `cached_calls`, `cost_usd`. Nunca el texto de la pregunta ni de la respuesta.
-- `audit`: `action: "tool_call"`, `tool`, `args`, uno por herramienta ejecutada.
+- `audit`: `action: "tool_call"`, `tool`, `args` (enmascarados con `mask_pii`), uno por herramienta ejecutada.
 - `error`: `error_type` (solo el tipo, sin el mensaje).
 - `pii_detected`: `pii_type`, `count` y `direction` (`input` u `output`), uno por
   tipo detectado. Nunca el valor detectado.
 - `output_rejected`: `reason`, cuando la respuesta del modelo se rechaza. Nunca el
   texto rechazado.
+- `supervisor_decision`: `specialist` y `method` (`rules` o `model`). Nunca el texto
+  de la pregunta.
+- `input_blocked`: `reason`, solo la frase que coincidió con el patrón de
+  inyección. Nunca el texto de la pregunta.
 
 Para seguir una petición, filtra el log por su `request_id`.
 

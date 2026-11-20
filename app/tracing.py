@@ -73,3 +73,37 @@ class Tracing:
             enabled=True, client=self._client, metadata=metadata
         ):
             yield metadata
+
+    @contextmanager
+    def request(
+        self, request_id: str, client: str | None = None
+    ) -> Iterator[dict]:
+        """Run raíz de la petición; las etapas cuelgan de él.
+
+        :param request_id: Id de la petición
+        :type request_id: str
+        :param client: Nombre del cliente autenticado (opcional)
+        :type client: str | None
+        :return: Los metadatos de la traza (vacíos si las trazas están apagadas)
+        :rtype: Iterator[dict]
+        """
+        # El ``with`` cierra el run aunque quien llama lance una excepción.
+        # pylint: disable-next=contextmanager-generator-missing-cleanup
+        with self.context(request_id, client) as metadata:
+            with self.stage("request"):
+                yield metadata
+
+    @contextmanager
+    def stage(self, name: str) -> Iterator[None]:
+        """Run de una etapa del pipeline (``agent.guard``, ``agent.reviewer``...).
+
+        No guarda entradas ni salidas: solo el nombre y la duración de la etapa.
+
+        :param name: Nombre del run
+        :type name: str
+        """
+        if not self.enabled:
+            yield
+            return
+        with langsmith.trace(name=name, run_type="chain", client=self._client):
+            yield

@@ -30,7 +30,7 @@ Feature: Make every answer cheaper without making it worse
     Given a spy model that counts the messages it receives
     And the history window is 6 messages
     When I ask "¿Quién es EMP-0004?" with a history of 10 messages
-    Then the first model call receives 7 messages
+    Then the first model call receives 8 messages
     And the agent_run line records 10 history messages and 6 sent
 
   Scenario: The metrics add up the cost of the answers

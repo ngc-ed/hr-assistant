@@ -15,11 +15,6 @@ services:
       # Workers de uvicorn; /metrics y el límite de peticiones son por proceso
       - key: WEB_CONCURRENCY
         value: "2"
-      # El límite de peticiones es por proceso y por cliente (clave). Con el valor
-      # por omisión (30) la carga de verificación, con una sola clave, se
-      # rechazaba con 429; se sube para permitirla.
-      - key: RATE_LIMIT_PER_MINUTE
-        value: "300"
       - key: HIDE_INPUTS
         value: "true"
       - key: HIDE_OUTPUTS

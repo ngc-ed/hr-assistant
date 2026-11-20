@@ -16,21 +16,24 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app.agent import Agent, AgentResult
+from app.agent import AgentResult
 from app.auth import extract_api_key_from_header, validate_api_key
 from app.clock import Clock, SystemClock
 from app.config import Settings, load_settings
 from app.costs import PriceTable
 from app.directory import EmployeeDirectory
 from app.gateway import MODEL_UNAVAILABLE_MESSAGE, ModelUnavailableError
+from app.input_guard import BLOCKED_MESSAGE, BLOCKED_STATUS, blocked_phrase
 from app.levers import Route, choose_model, window_history
 from app.lifecycle import exit_with_parent
 from app.llm import LanguageModel, build_models
 from app.logs import JsonLogger
 from app.metrics import Metrics
-from app.output_guard import SAFE_ANSWER, rejection_reason
+from app.output_guard import SAFE_ANSWER, asked_ids, rejection_reason
 from app.pii import mask_pii
 from app.rate_limiter import RateLimiter
+from app.specialists import EMPLOYEE, build_specialist
+from app.supervisor import METHOD_RULES, Supervisor
 from app.tracing import Tracing
 
 PRODUCT_ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +112,8 @@ class AskResponse(BaseModel):
     route: str
     cached_calls: int
     cost_usd: float
+    specialist: str
+    agents: list[str]
 
 
 @dataclass(frozen=True)
@@ -143,12 +148,15 @@ class _Assistant:
     :type prices: PriceTable
     :param directory: Directorio de empleados
     :type directory: EmployeeDirectory
+    :param supervisor: Supervisor que elige al especialista
+    :type supervisor: Supervisor
     """
 
     settings: Settings
     models: dict[str, LanguageModel]
     prices: PriceTable
     directory: EmployeeDirectory
+    supervisor: Supervisor
 
 
 @dataclass(frozen=True)
@@ -172,6 +180,8 @@ class _RunReport:
     result: AgentResult
     cost_usd: float
     department: str = UNKNOWN_DEPARTMENT
+    specialist: str = EMPLOYEE
+    method: str = METHOD_RULES
 
 
 def _resolve_request_id(candidate: str | None) -> str:
@@ -400,31 +410,80 @@ def _add_counts(totals: dict[str, int], counts: dict[str, int]) -> None:
         totals[kind] = totals.get(kind, 0) + count
 
 
-def _safe_answer(
-    answer: str,
-    settings: Settings,
-    observability: _Observability,
-    request_id: str,
-    client: str | None = None,
-) -> str:
-    """Enmascara y valida la respuesta; si no es segura, da el mensaje fijo.
+def _mask_args(args: dict) -> dict:
+    """Enmascara con ``pii.py`` los argumentos de una herramienta para la auditoría.
 
-    :param answer: Respuesta del agente
-    :type answer: str
-    :param settings: Configuración (largo máximo de la respuesta)
-    :type settings: Settings
+    :param args: Argumentos originales
+    :type args: dict
+    :return: Copia con los textos enmascarados
+    :rtype: dict
+    """
+    return {
+        key: mask_pii(value)[0] if isinstance(value, str) else value
+        for key, value in args.items()
+    }
+
+
+def _block_injection(
+    body: AskRequest, observability: _Observability, request_id: str,
+    client: str | None = None,
+) -> None:
+    """Guardián: corta la pregunta si trae una frase de inyección de prompt.
+
+    Corre antes del enmascarado y del modelo; solo registra la frase que coincidió.
+
+    :param body: Cuerpo sin enmascarar
+    :type body: AskRequest
     :param observability: Reloj, log, métricas y trazas
     :type observability: _Observability
     :param request_id: Id de la petición
     :type request_id: str
     :param client: Nombre del cliente (opcional)
     :type client: str | None
+    :raises HTTPException: ``400`` si hay una frase bloqueada
+    """
+    texts = [body.question] + [message.content for message in body.history]
+    for text in texts:
+        phrase = blocked_phrase(text)
+        if phrase is not None:
+            observability.logger.log(
+                "input_blocked", request_id, client=client, reason=phrase
+            )
+            observability.metrics.record_input_blocked()
+            raise HTTPException(status_code=BLOCKED_STATUS, detail=BLOCKED_MESSAGE)
+
+
+def _safe_answer(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    answer: str,
+    settings: Settings,
+    directory: EmployeeDirectory,
+    observability: _Observability,
+    request_id: str,
+    client: str | None = None,
+    asked: frozenset[str] = frozenset(),
+) -> str:
+    """Revisor: enmascara y valida la respuesta; si no es segura, da el mensaje fijo.
+
+    :param answer: Respuesta del agente
+    :type answer: str
+    :param settings: Configuración (largo máximo de la respuesta)
+    :type settings: Settings
+    :param directory: Directorio para comprobar los ids que nombra la respuesta
+    :type directory: EmployeeDirectory
+    :param observability: Reloj, log, métricas y trazas
+    :type observability: _Observability
+    :param request_id: Id de la petición
+    :type request_id: str
+    :param client: Nombre del cliente (opcional)
+    :type client: str | None
+    :param asked: Ids ``EMP-xxxx`` que la persona nombró en la conversación
+    :type asked: frozenset[str]
     :return: La respuesta enmascarada o el mensaje seguro
     :rtype: str
     """
     masked, counts = mask_pii(answer)
     _log_pii(observability.logger, request_id, counts, "output", client)
-    reason = rejection_reason(masked, settings.max_answer_chars)
+    reason = rejection_reason(masked, settings.max_answer_chars, directory, asked)
     if reason is None:
         return masked
     # Solo el motivo: el texto rechazado nunca va al log.
@@ -488,15 +547,31 @@ def _run_agent(
         if department:
             departments.append(department)
         observability.logger.log(
-            "audit", request_id, client=client, action="tool_call", tool=tool, args=args
+            "audit",
+            request_id,
+            client=client,
+            action="tool_call",
+            tool=tool,
+            args=_mask_args(args),
         )
 
     route = choose_model(body.question, settings)
     history = window_history(
         [message.model_dump() for message in body.history], settings.history_window
     )
-    # Un agente por petición: no hay estado compartido entre hilos.
-    agent = Agent(
+    with observability.tracing.stage("agent.supervisor"):
+        decision = assistant.supervisor.decide(body.question)
+    observability.metrics.record_pipeline(decision.specialist, decision.method)
+    observability.logger.log(
+        "supervisor_decision",
+        request_id,
+        client=client,
+        specialist=decision.specialist,
+        method=decision.method,
+    )
+    # Un especialista por petición: no hay estado compartido entre hilos.
+    agent = build_specialist(
+        decision.specialist,
         assistant.models[route.model],
         assistant.directory,
         max_steps=settings.agent_max_steps,
@@ -504,7 +579,8 @@ def _run_agent(
     with observability.tracing.context(
         request_id, client, route=route.reason, model=route.model
     ) as trace_metadata:
-        result = agent.run(body.question, history, on_tool_call=audit)
+        with observability.tracing.stage(f"agent.{decision.specialist}"):
+            result = agent.run(body.question, history, on_tool_call=audit)
         cost_usd = assistant.prices.cost_usd(
             route.model, result.billable_input_tokens, result.billable_output_tokens
         )
@@ -516,6 +592,8 @@ def _run_agent(
         result=result,
         cost_usd=cost_usd,
         department=departments[0] if departments else UNKNOWN_DEPARTMENT,
+        specialist=decision.specialist,
+        method=decision.method,
     )
 
 
@@ -563,13 +641,30 @@ def _register_routes(
     @app.post("/ask", response_model=AskResponse)
     def ask(body: AskRequest, request: Request) -> AskResponse | JSONResponse:
         """Responde una pregunta sin guardar nada entre peticiones."""
-        _check_question_length(body, assistant.settings)
         request_id = request.state.request_id
         client = getattr(request.state, CLIENT_REQUEST_KEY, None)
-        # Enganche para observability: ``input_pii`` son las detecciones de la
-        # pregunta y el historial, por tipo, para sumar a ``pii_by_type``.
-        body, input_pii = _mask_request(body)
-        _log_pii(observability.logger, request_id, input_pii, "input", client)
+        # Un run raíz por petición; cada etapa cuelga de él.
+        with observability.tracing.request(request_id, client):
+            return _answer(
+                assistant, observability, body, request_id, client
+            )
+
+    def _answer(
+        assistant: _Assistant,
+        observability: _Observability,
+        body: AskRequest,
+        request_id: str,
+        client: str | None,
+    ) -> AskResponse | JSONResponse:
+        """Corre las cuatro etapas del pipeline para una pregunta."""
+        # El guardián corre primero: antes del enmascarado y de todo modelo.
+        with observability.tracing.stage("agent.guard"):
+            _block_injection(body, observability, request_id, client)
+            _check_question_length(body, assistant.settings)
+            # Enganche para observability: ``input_pii`` son las detecciones de la
+            # pregunta y el historial, por tipo, para sumar a ``pii_by_type``.
+            body, input_pii = _mask_request(body)
+            _log_pii(observability.logger, request_id, input_pii, "input", client)
         try:
             report = _run_agent(assistant, observability, body, request_id, client)
         except ModelUnavailableError as error:
@@ -596,9 +691,16 @@ def _register_routes(
             result.cached_calls,
         )
         _log_agent_run(observability.logger, request_id, body, report, client=client)
-        answer = _safe_answer(
-            result.answer, assistant.settings, observability, request_id, client
-        )
+        with observability.tracing.stage("agent.reviewer"):
+            answer = _safe_answer(
+                result.answer,
+                assistant.settings,
+                assistant.directory,
+                observability,
+                request_id,
+                client,
+                asked_ids(body.question),
+            )
         return AskResponse(
             answer=answer,
             steps=result.steps,
@@ -610,6 +712,8 @@ def _register_routes(
             route=report.route.reason,
             cached_calls=result.cached_calls,
             cost_usd=report.cost_usd,
+            specialist=report.specialist,
+            agents=["guard", "supervisor", report.specialist, "reviewer"],
         )
 
 
@@ -662,7 +766,11 @@ def create_app(
     else:
         models = {settings.model_small: model, settings.model_large: model}
     assistant = _Assistant(
-        settings=settings, models=models, prices=prices, directory=directory
+        settings=settings,
+        models=models,
+        prices=prices,
+        directory=directory,
+        supervisor=Supervisor(directory, models[settings.model_small]),
     )
     page = INDEX_PATH.read_text(encoding="utf-8")
     clock = clock or SystemClock()

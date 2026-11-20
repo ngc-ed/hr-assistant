@@ -47,6 +47,9 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
         self._tools: dict[str, int] = {}
         self._model_routes: dict[str, int] = {}
         self._pii: dict[str, int] = {}
+        self._specialists: dict[str, int] = {}
+        self._decisions: dict[str, int] = {}
+        self._input_blocked = 0
         self._lock = Lock()
 
     def record_request(self, status: int, latency_ms: float) -> None:
@@ -118,6 +121,23 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
             for kind, count in counts.items():
                 self._pii[kind] = self._pii.get(kind, 0) + count
 
+    def record_pipeline(self, specialist: str, method: str) -> None:
+        """Suma una pregunta por especialista y por método del supervisor.
+
+        :param specialist: ``employee`` o ``department``
+        :type specialist: str
+        :param method: ``rules`` o ``model``
+        :type method: str
+        """
+        with self._lock:
+            self._specialists[specialist] = self._specialists.get(specialist, 0) + 1
+            self._decisions[method] = self._decisions.get(method, 0) + 1
+
+    def record_input_blocked(self) -> None:
+        """Suma una pregunta bloqueada por el guardián."""
+        with self._lock:
+            self._input_blocked += 1
+
     def snapshot(self, pid: int) -> dict:
         """Devuelve el estado actual con la forma de ``GET /metrics``.
 
@@ -145,6 +165,13 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
                     self._cost_usd / self._answered if self._answered else 0.0
                 ),
             }
+            if self._specialists or self._input_blocked:
+                business.update(
+                    by_specialist=dict(self._specialists),
+                    supervisor_decisions=dict(self._decisions),
+                    input_blocked=self._input_blocked,
+                )
+                has_business = True
             latencies = sorted(self._latencies)
             requests = self._requests
             errors = self._errors
