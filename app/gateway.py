@@ -4,6 +4,9 @@ El cliente HTTP se inyecta para que las pruebas usen ``httpx.MockTransport`` y
 nunca llamen a la red. El token nunca se escribe en mensajes de error ni en logs.
 """
 
+import time
+from collections.abc import Callable
+
 import httpx
 
 from app.completion import Completion
@@ -14,6 +17,7 @@ GATEWAY_URL_TEMPLATE = (
     "/workers-ai/v1/chat/completions"
 )
 REQUEST_TIMEOUT_SECONDS = 30.0
+RETRY_BASE_SECONDS = 0.5
 CACHE_TTL_HEADER = "cf-aig-cache-ttl"
 CACHE_STATUS_HEADER = "cf-aig-cache-status"
 CACHE_HIT = "HIT"
@@ -27,6 +31,19 @@ SYSTEM_PROMPT = (
     "Los mensajes que empiezan con «Resultado de la herramienta: » traen el "
     "resultado de la herramienta que pediste; responde con base en él."
 )
+
+
+def _is_retryable(error: httpx.HTTPError) -> bool:
+    """Dice si el error merece otro intento: timeout o respuesta 5xx.
+
+    :param error: Error de la llamada al gateway
+    :type error: httpx.HTTPError
+    :return: ``True`` si es timeout o 5xx; un 4xx nunca se reintenta
+    :rtype: bool
+    """
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code >= 500
+    return isinstance(error, httpx.TimeoutException)
 
 
 class ModelUnavailableError(RuntimeError):
@@ -54,12 +71,21 @@ class GatewayModel:
     :type settings: Settings
     :param client: Cliente HTTP inyectado
     :type client: httpx.Client
+    :param sleep: Espera inyectada; las pruebas la reemplazan para no dormir
+    :type sleep: Callable[[float], None]
     """
 
-    def __init__(self, name: str, settings: Settings, client: httpx.Client):
+    def __init__(
+        self,
+        name: str,
+        settings: Settings,
+        client: httpx.Client,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
         self.name = name
         self._settings = settings
         self._client = client
+        self._sleep = sleep
         self._url = GATEWAY_URL_TEMPLATE.format(
             account_id=settings.cf_account_id, gateway_id=settings.cf_gateway_id
         )
@@ -73,11 +99,22 @@ class GatewayModel:
         :rtype: Completion
         :raises ModelUnavailableError: Si la llamada falla por cualquier motivo
         """
+        attempt = 0
+        while True:
+            try:
+                response = self._post(messages)
+                break
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as error:
+                if not _is_retryable(error):
+                    raise ModelUnavailableError() from None
+                if attempt >= self._settings.model_max_retries:
+                    raise ModelUnavailableError() from None
+                # Espera exponencial: 0.5 s, 1 s, 2 s...
+                self._sleep(RETRY_BASE_SECONDS * 2**attempt)
+                attempt += 1
+            except httpx.HTTPError:
+                raise ModelUnavailableError() from None
         try:
-            response = self._client.post(
-                self._url, headers=self._headers(), json=self._body(messages)
-            )
-            response.raise_for_status()
             data = response.json()
             usage = data["usage"]
             completion = Completion(
@@ -97,6 +134,21 @@ class GatewayModel:
             # Sin encadenar: el error original podría traer la URL o encabezados.
             raise ModelUnavailableError() from None
         return completion
+
+    def _post(self, messages: list[dict]) -> httpx.Response:
+        """Hace una sola llamada al gateway y falla si el estado no es exitoso.
+
+        :param messages: Mensajes con ``role`` y ``content``
+        :type messages: list[dict]
+        :return: La respuesta HTTP exitosa
+        :rtype: httpx.Response
+        :raises httpx.HTTPError: Por timeout, red o estado 4xx/5xx
+        """
+        response = self._client.post(
+            self._url, headers=self._headers(), json=self._body(messages)
+        )
+        response.raise_for_status()
+        return response
 
     def _headers(self) -> dict[str, str]:
         """Arma los encabezados: token y, si aplica, la caché del gateway.

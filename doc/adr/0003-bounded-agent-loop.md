@@ -1,6 +1,6 @@
 # 0003. Un solo agente con bucle con tope y protocolo JSON
 
-Estado: propuesto
+Estado: aceptado
 
 ## Contexto
 

@@ -1,6 +1,6 @@
 # 0007. Enrutamiento por regla entre dos modelos con nombre
 
-Estado: propuesto
+Estado: aceptado
 
 ## Contexto
 

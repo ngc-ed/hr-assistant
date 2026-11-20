@@ -1,6 +1,6 @@
 # 0001. API sin estado
 
-Estado: propuesto
+Estado: aceptado
 
 ## Contexto
 

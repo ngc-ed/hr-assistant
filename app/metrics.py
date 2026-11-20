@@ -40,6 +40,13 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
         self._input_tokens = 0
         self._output_tokens = 0
         self._cost_usd = 0.0
+        self._answered = 0
+        self._cached_answers = 0
+        self._cached_calls = 0
+        self._departments: dict[str, int] = {}
+        self._tools: dict[str, int] = {}
+        self._model_routes: dict[str, int] = {}
+        self._pii: dict[str, int] = {}
         self._lock = Lock()
 
     def record_request(self, status: int, latency_ms: float) -> None:
@@ -77,15 +84,67 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
         with self._lock:
             self._cost_usd += cost_usd
 
+    def record_question(
+        self, department: str, tools: list[str], model: str, cached_calls: int
+    ) -> None:
+        """Suma una pregunta respondida con sus datos de negocio.
+
+        :param department: Departamento de la pregunta (``desconocido`` si no hay)
+        :type department: str
+        :param tools: Herramientas ejecutadas, en orden
+        :type tools: list[str]
+        :param model: Modelo que respondió (ruta de modelo)
+        :type model: str
+        :param cached_calls: Llamadas servidas desde la caché del gateway
+        :type cached_calls: int
+        """
+        with self._lock:
+            self._answered += 1
+            if cached_calls > 0:
+                self._cached_answers += 1
+            self._cached_calls += cached_calls
+            self._departments[department] = self._departments.get(department, 0) + 1
+            self._model_routes[model] = self._model_routes.get(model, 0) + 1
+            for tool in tools:
+                self._tools[tool] = self._tools.get(tool, 0) + 1
+
+    def record_pii(self, counts: dict[str, int]) -> None:
+        """Suma detecciones de datos personales por tipo (nunca sus valores).
+
+        :param counts: Número de detecciones por tipo (``CORREO``, ``RFC``...)
+        :type counts: dict[str, int]
+        """
+        with self._lock:
+            for kind, count in counts.items():
+                self._pii[kind] = self._pii.get(kind, 0) + count
+
     def snapshot(self, pid: int) -> dict:
         """Devuelve el estado actual con la forma de ``GET /metrics``.
 
         :param pid: Id del proceso que reporta
         :type pid: int
-        :return: Peticiones, tasa de error, latencias, tokens, SLO y costo
+        :return: Peticiones, tasa de error, latencias, tokens, SLO, costo y
+            métricas de negocio
         :rtype: dict
         """
         with self._lock:
+            # Un proceso sin tráfico de negocio conserva la forma original.
+            has_business = bool(self._answered or self._pii)
+            business = {
+                "questions_by_department": dict(self._departments),
+                "tool_usage": dict(self._tools),
+                "cache_hit_pct": (
+                    100 * self._cached_answers / self._answered
+                    if self._answered
+                    else 0
+                ),
+                "pii_by_type": dict(self._pii),
+                "model_routes": dict(self._model_routes),
+                "cached_calls": self._cached_calls,
+                "cost_per_request_usd": (
+                    self._cost_usd / self._answered if self._answered else 0.0
+                ),
+            }
             latencies = sorted(self._latencies)
             requests = self._requests
             errors = self._errors
@@ -101,4 +160,5 @@ class Metrics:  # pylint: disable=too-many-instance-attributes
             "tokens": tokens,
             "slo": {"p95_ms_target": self._slo_p95_ms, "met": p95 < self._slo_p95_ms},
             "cost_usd": cost_usd,
+            **(business if has_business else {}),
         }

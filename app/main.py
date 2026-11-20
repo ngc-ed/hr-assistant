@@ -24,9 +24,12 @@ from app.costs import PriceTable
 from app.directory import EmployeeDirectory
 from app.gateway import MODEL_UNAVAILABLE_MESSAGE, ModelUnavailableError
 from app.levers import Route, choose_model, window_history
+from app.lifecycle import exit_with_parent
 from app.llm import LanguageModel, build_models
 from app.logs import JsonLogger
 from app.metrics import Metrics
+from app.output_guard import SAFE_ANSWER, rejection_reason
+from app.pii import mask_pii
 from app.rate_limiter import RateLimiter
 from app.tracing import Tracing
 
@@ -40,8 +43,11 @@ MODEL_UNAVAILABLE_STATUS = 502
 MILLISECONDS_PER_SECOND = 1000
 LATENCY_DECIMALS = 3
 # Rutas públicas que no requieren clave
-PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json"}
+PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/dashboard"}
 CLIENT_REQUEST_KEY = "client"
+UNKNOWN_DEPARTMENT = "desconocido"
+QUESTION_TOO_LONG_STATUS = 422
+DASHBOARD_PATH = Path(__file__).resolve().parent / "static" / "dashboard.html"
 
 
 class HistoryMessage(BaseModel):
@@ -157,12 +163,15 @@ class _RunReport:
     :type result: AgentResult
     :param cost_usd: Costo de la respuesta en USD
     :type cost_usd: float
+    :param department: Departamento consultado (``desconocido`` si no hubo)
+    :type department: str
     """
 
     route: Route
     history_sent: int
     result: AgentResult
     cost_usd: float
+    department: str = UNKNOWN_DEPARTMENT
 
 
 def _resolve_request_id(candidate: str | None) -> str:
@@ -325,12 +334,126 @@ def _check_question_length(body: AskRequest, settings: Settings) -> None:
     """
     if len(body.question) > settings.max_question_chars:
         raise HTTPException(
-            status_code=422,
+            status_code=QUESTION_TOO_LONG_STATUS,
             detail=(
                 "question must have at most "
                 f"{settings.max_question_chars} characters"
             ),
         )
+
+
+def _log_pii(
+    logger: JsonLogger,
+    request_id: str,
+    counts: dict[str, int],
+    direction: str,
+    client: str | None = None,
+) -> None:
+    """Escribe un ``pii_detected`` por tipo, con conteo y sin el valor.
+
+    :param logger: Log JSON de eventos
+    :type logger: JsonLogger
+    :param request_id: Id de la petición
+    :type request_id: str
+    :param counts: Detecciones por tipo
+    :type counts: dict[str, int]
+    :param direction: ``input`` u ``output``
+    :type direction: str
+    :param client: Nombre del cliente (opcional)
+    :type client: str | None
+    """
+    for pii_type, count in counts.items():
+        logger.log(
+            "pii_detected", request_id, client=client,
+            pii_type=pii_type, count=count, direction=direction,
+        )
+
+
+def _mask_request(body: AskRequest) -> tuple[AskRequest, dict[str, int]]:
+    """Enmascara la pregunta y el historial antes de que lleguen al modelo.
+
+    :param body: Cuerpo original de la petición
+    :type body: AskRequest
+    :return: El cuerpo enmascarado y las detecciones por tipo (sin valores)
+    :rtype: tuple[AskRequest, dict[str, int]]
+    """
+    totals: dict[str, int] = {}
+    question, counts = mask_pii(body.question)
+    _add_counts(totals, counts)
+    history = []
+    for message in body.history:
+        content, counts = mask_pii(message.content)
+        _add_counts(totals, counts)
+        history.append(HistoryMessage(role=message.role, content=content))
+    return AskRequest(question=question, history=history), totals
+
+
+def _add_counts(totals: dict[str, int], counts: dict[str, int]) -> None:
+    """Suma ``counts`` a ``totals``.
+
+    :param totals: Acumulado por tipo (se modifica)
+    :type totals: dict[str, int]
+    :param counts: Conteos a sumar
+    :type counts: dict[str, int]
+    """
+    for kind, count in counts.items():
+        totals[kind] = totals.get(kind, 0) + count
+
+
+def _safe_answer(
+    answer: str,
+    settings: Settings,
+    observability: _Observability,
+    request_id: str,
+    client: str | None = None,
+) -> str:
+    """Enmascara y valida la respuesta; si no es segura, da el mensaje fijo.
+
+    :param answer: Respuesta del agente
+    :type answer: str
+    :param settings: Configuración (largo máximo de la respuesta)
+    :type settings: Settings
+    :param observability: Reloj, log, métricas y trazas
+    :type observability: _Observability
+    :param request_id: Id de la petición
+    :type request_id: str
+    :param client: Nombre del cliente (opcional)
+    :type client: str | None
+    :return: La respuesta enmascarada o el mensaje seguro
+    :rtype: str
+    """
+    masked, counts = mask_pii(answer)
+    _log_pii(observability.logger, request_id, counts, "output", client)
+    reason = rejection_reason(masked, settings.max_answer_chars)
+    if reason is None:
+        return masked
+    # Solo el motivo: el texto rechazado nunca va al log.
+    observability.logger.log(
+        "output_rejected", request_id, client=client, reason=reason
+    )
+    return SAFE_ANSWER
+
+
+def _tool_department(
+    directory: EmployeeDirectory, tool: str, args: dict
+) -> str | None:
+    """Saca el departamento que consultó una herramienta.
+
+    :param directory: Directorio de empleados
+    :type directory: EmployeeDirectory
+    :param tool: Nombre de la herramienta
+    :type tool: str
+    :param args: Argumentos de la herramienta
+    :type args: dict
+    :return: El departamento o ``None`` si no se puede saber
+    :rtype: str | None
+    """
+    if tool == "search_by_department":
+        return str(args.get("department", "")).strip() or None
+    if tool == "get_employee":
+        employee = directory.get_employee(str(args.get("employee_id", "")))
+        return employee.get("department") if employee else None
+    return None
 
 
 def _run_agent(
@@ -357,9 +480,13 @@ def _run_agent(
     :raises ModelUnavailableError: Si el modelo no responde
     """
     settings = assistant.settings
+    departments: list[str] = []
 
     def audit(tool: str, args: dict) -> None:
         """Deja una línea ``audit`` por cada herramienta ejecutada."""
+        department = _tool_department(assistant.directory, tool, args)
+        if department:
+            departments.append(department)
         observability.logger.log(
             "audit", request_id, client=client, action="tool_call", tool=tool, args=args
         )
@@ -374,13 +501,21 @@ def _run_agent(
         assistant.directory,
         max_steps=settings.agent_max_steps,
     )
-    with observability.tracing.context(request_id, client):
+    with observability.tracing.context(
+        request_id, client, route=route.reason, model=route.model
+    ) as trace_metadata:
         result = agent.run(body.question, history, on_tool_call=audit)
-    cost_usd = assistant.prices.cost_usd(
-        route.model, result.billable_input_tokens, result.billable_output_tokens
-    )
+        cost_usd = assistant.prices.cost_usd(
+            route.model, result.billable_input_tokens, result.billable_output_tokens
+        )
+        # El costo solo se conoce al terminar la corrida.
+        trace_metadata["cost_usd"] = cost_usd
     return _RunReport(
-        route=route, history_sent=len(history), result=result, cost_usd=cost_usd
+        route=route,
+        history_sent=len(history),
+        result=result,
+        cost_usd=cost_usd,
+        department=departments[0] if departments else UNKNOWN_DEPARTMENT,
     )
 
 
@@ -389,6 +524,7 @@ def _register_routes(
     assistant: _Assistant,
     observability: _Observability,
     page: str,
+    dashboard_page: str,
 ) -> None:
     """Registra las rutas de la API.
 
@@ -400,12 +536,19 @@ def _register_routes(
     :type observability: _Observability
     :param page: HTML de la página web
     :type page: str
+    :param dashboard_page: HTML del tablero
+    :type dashboard_page: str
     """
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/",response_class=HTMLResponse)
     def home() -> str:
         """Sirve la página web."""
         return page
+
+    @app.get("/dashboard", response_class=HTMLResponse)
+    def dashboard() -> str:
+        """Sirve el tablero: HTML sin cifras ni clave (pública)."""
+        return dashboard_page
 
     @app.get("/health")
     def health() -> dict:
@@ -423,6 +566,10 @@ def _register_routes(
         _check_question_length(body, assistant.settings)
         request_id = request.state.request_id
         client = getattr(request.state, CLIENT_REQUEST_KEY, None)
+        # Enganche para observability: ``input_pii`` son las detecciones de la
+        # pregunta y el historial, por tipo, para sumar a ``pii_by_type``.
+        body, input_pii = _mask_request(body)
+        _log_pii(observability.logger, request_id, input_pii, "input", client)
         try:
             report = _run_agent(assistant, observability, body, request_id, client)
         except ModelUnavailableError as error:
@@ -441,9 +588,19 @@ def _register_routes(
         result = report.result
         observability.metrics.record_tokens(result.input_tokens, result.output_tokens)
         observability.metrics.record_cost(report.cost_usd)
+        observability.metrics.record_pii(input_pii)
+        observability.metrics.record_question(
+            report.department,
+            result.tools_used,
+            report.route.model,
+            result.cached_calls,
+        )
         _log_agent_run(observability.logger, request_id, body, report, client=client)
+        answer = _safe_answer(
+            result.answer, assistant.settings, observability, request_id, client
+        )
         return AskResponse(
-            answer=result.answer,
+            answer=answer,
             steps=result.steps,
             tools_used=result.tools_used,
             input_tokens=result.input_tokens,
@@ -522,8 +679,11 @@ def create_app(
     _add_auth_middleware(app, settings, rate_limiter)
     # Luego observación
     _add_request_middleware(app, observability)
-    _register_routes(app, assistant, observability, page)
+    dashboard_page = DASHBOARD_PATH.read_text(encoding="utf-8")
+    _register_routes(app, assistant, observability, page, dashboard_page)
     return app
 
 
 app = create_app()
+# Si este proceso es un worker, muere junto con su proceso padre.
+exit_with_parent()

@@ -11,6 +11,7 @@ SUPPORTED_PROVIDERS = ("fake", GATEWAY_PROVIDER)
 DEFAULT_MODEL_PROVIDER = "fake"
 DEFAULT_AGENT_MAX_STEPS = 3
 DEFAULT_MAX_QUESTION_CHARS = 2000
+DEFAULT_MAX_ANSWER_CHARS = 2000
 DEFAULT_EMPLOYEES_PATH = "data/employees.json"
 DEFAULT_SERVICE_NAME = "hr-assistant"
 DEFAULT_SLO_P95_MS = 2000
@@ -25,6 +26,7 @@ DEFAULT_CACHE_TTL_SECONDS = 0
 DEFAULT_PRICES_PATH = "data/model_prices.json"
 DEFAULT_ENVIRONMENT = "development"
 DEFAULT_RATE_LIMIT_PER_MINUTE = 30
+DEFAULT_MODEL_MAX_RETRIES = 2
 MIN_API_KEY_LENGTH = 16
 BOOLEAN_VALUES = {"true": True, "false": False}
 
@@ -87,6 +89,10 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     :type rate_limit_per_minute: int
     :param langsmith_api_key: Clave de LangSmith (secreto, fuera de ``repr``)
     :type langsmith_api_key: str
+    :param model_max_retries: Reintentos ante timeout o 5xx del gateway
+    :type model_max_retries: int
+    :param max_answer_chars: Largo máximo de una respuesta válida
+    :type max_answer_chars: int
     """
 
     model_provider: str = DEFAULT_MODEL_PROVIDER
@@ -115,6 +121,8 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     api_keys: dict[str, str] | None = None
     rate_limit_per_minute: int = DEFAULT_RATE_LIMIT_PER_MINUTE
     langsmith_api_key: str = field(default="", repr=False)
+    model_max_retries: int = DEFAULT_MODEL_MAX_RETRIES
+    max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS
 
 
 def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -289,6 +297,9 @@ def _levers(env: Mapping[str, str]) -> dict:
         "model_temperature": _non_negative_float(
             env, "MODEL_TEMPERATURE", DEFAULT_MODEL_TEMPERATURE
         ),
+        "model_max_retries": _non_negative_int(
+            env, "MODEL_MAX_RETRIES", DEFAULT_MODEL_MAX_RETRIES
+        ),
         "cache_ttl_seconds": _non_negative_int(
             env, "CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL_SECONDS
         ),
@@ -394,6 +405,9 @@ def load_settings(env: Mapping[str, str]) -> Settings:
             env, "RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_PER_MINUTE
         ),
         "langsmith_api_key": langsmith_key,
+        "max_answer_chars": _positive_int(
+            env, "MAX_ANSWER_CHARS", DEFAULT_MAX_ANSWER_CHARS
+        ),
     }
 
     # Parsear API_KEYS en desarrollo (sin validación strict)

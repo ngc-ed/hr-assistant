@@ -33,7 +33,30 @@ Luego abre `http://127.0.0.1:8000/` en el navegador.
 | `GET /` | La página web; bajo cada respuesta muestra el id de la petición |
 | `GET /health` | `{"status": "ok", "pid": ...}` |
 | `POST /ask` (pide `X-API-Key`) | Recibe `{"question", "history"}`; responde `answer`, `steps`, `tools_used`, `input_tokens`, `output_tokens`, `request_id`, `model`, `route`, `cached_calls` y `cost_usd` |
-| `GET /metrics` (pide `X-API-Key`) | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`) y `cost_usd` acumulado |
+| `GET /dashboard` | El tablero: HTML sin cifras y sin clave; no pide `X-API-Key` |
+| `GET /metrics` (pide `X-API-Key`) | `pid`, `requests`, `error_rate`, `latency_ms` (`p50`, `p95`), `tokens` (`input`, `output`), `slo` (`p95_ms_target`, `met`), `cost_usd` acumulado y las métricas de negocio (ver abajo) |
+
+## Tablero y métricas de negocio
+
+`/dashboard` abre sin clave: un navegador no puede mandar `X-API-Key` al abrir una
+URL. La página pide la clave, la guarda en `sessionStorage` (la misma de la página
+principal) y lee `/metrics` cada 5 segundos con `X-API-Key`. Muestra peticiones,
+`error_rate`, p50 y p95 contra el SLO, costo acumulado y promedio por petición,
+rutas de modelo, llamadas con caché y PII por tipo. Sin clave válida no muestra
+cifras, y la clave nunca va en el código de la página.
+
+**`/metrics` es por proceso.** Con varios workers de uvicorn (`WEB_CONCURRENCY`),
+cada petición ve las cifras de uno solo; el tablero puede oscilar entre workers.
+
+Métricas de negocio de `/metrics` (aparecen cuando el proceso ya atendió una
+pregunta o detectó PII): `questions_by_department` (nombre a número), `tool_usage`
+(herramienta a número), `cache_hit_pct` (0 a 100, peticiones con caché),
+`pii_by_type` (`CORREO`, `RFC`... a número), y para el tablero `model_routes`,
+`cached_calls` y `cost_per_request_usd`.
+
+Con `LANGSMITH_TRACING=true`, cada traza lleva los metadatos `request_id`, `client`,
+`route`, `model` y `cost_usd`; con `HIDE_INPUTS` y `HIDE_OUTPUTS` en `true` no va el
+texto de la pregunta ni de la respuesta.
 
 Toda respuesta trae el encabezado `X-Request-ID`. Si el cliente lo manda con forma
 válida (`[A-Za-z0-9._:-]`, de 1 a 128 caracteres) se conserva; si no, se genera un
@@ -44,9 +67,11 @@ caído, tiempo agotado o respuesta inválida) responde `502` con
 
 ## Acceso por clave y límite de peticiones
 
-`POST /ask` y `GET /metrics` exigen el encabezado `X-API-Key`. `GET /`, `GET /health`
-y `/docs` no piden clave. Cada cliente tiene su clave en `API_KEYS`, con la forma
-`cliente:clave,cliente2:clave2`.
+`POST /ask` y `GET /metrics` exigen el encabezado `X-API-Key` cuando hay claves en
+`API_KEYS`. Sin `API_KEYS` la API queda abierta fuera de producción; solo
+`ENVIRONMENT=production` lo impide (el producto no arranca). `GET /`, `GET /health`,
+`GET /dashboard` y `/docs` no piden clave. Cada cliente tiene su clave en
+`API_KEYS`, con la forma `cliente:clave,cliente2:clave2`.
 
 - Sin clave o con una inválida responde `401` con
   `{"detail": "invalid or missing API key"}`.
@@ -151,6 +176,10 @@ Una línea JSON por evento con `ts` (UTC), `service`, `event` y `request_id`:
   `cached_calls`, `cost_usd`. Nunca el texto de la pregunta ni de la respuesta.
 - `audit`: `action: "tool_call"`, `tool`, `args`, uno por herramienta ejecutada.
 - `error`: `error_type` (solo el tipo, sin el mensaje).
+- `pii_detected`: `pii_type`, `count` y `direction` (`input` u `output`), uno por
+  tipo detectado. Nunca el valor detectado.
+- `output_rejected`: `reason`, cuando la respuesta del modelo se rechaza. Nunca el
+  texto rechazado.
 
 Para seguir una petición, filtra el log por su `request_id`.
 
@@ -183,6 +212,9 @@ Para seguir una petición, filtra el log por su `request_id`.
 | `ENVIRONMENT` | `development` | Ambiente: `development` o `production`; compliance estricta en `production` |
 | `API_KEYS` | vacía | Clientes y claves en formato `cliente:clave,cliente2:clave2` (secreto) |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Límite de peticiones por cliente por minuto |
+| `MAX_ANSWER_CHARS` | `2000` | Largo máximo de la respuesta; una más larga se rechaza (`output_rejected`) |
+| `MODEL_MAX_RETRIES` | `2` | Reintentos de la llamada al modelo antes de responder `502` |
+| `WEB_CONCURRENCY` | `2` (en el contenedor) | Workers de uvicorn; lo lee el `CMD` del `Dockerfile`, no la app |
 
 Todas las variables están en `.env.example`, sin valores secretos.
 

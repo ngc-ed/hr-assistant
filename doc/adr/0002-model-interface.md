@@ -1,6 +1,6 @@
 # 0002. Interfaz del modelo y modelo simulado
 
-Estado: propuesto (ampliado por ADR 0007 y 0008)
+Estado: aceptado (ampliado por ADR 0007 y 0008)
 
 ## Contexto
 

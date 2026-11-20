@@ -1,6 +1,6 @@
 # 0008. Modelo real por Cloudflare AI Gateway con cliente HTTP inyectado
 
-Estado: propuesto
+Estado: aceptado
 
 ## Contexto
 

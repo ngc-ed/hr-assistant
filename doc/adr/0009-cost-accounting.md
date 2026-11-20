@@ -1,6 +1,6 @@
 # 0009. Costo por respuesta con tabla de precios local
 
-Estado: propuesto
+Estado: aceptado
 
 ## Contexto
 

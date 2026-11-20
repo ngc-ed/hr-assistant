@@ -24,6 +24,11 @@ Endpoints públicos sin clave: `GET /`, `GET /health`, `GET /docs`.
 Fuera de producción, si `API_KEYS` está vacía el middleware no pide clave, para
 facilitar el desarrollo local. En producción una `API_KEYS` vacía impide arrancar.
 
+Advertencia explícita: sin `API_KEYS`, `POST /ask` y `GET /metrics` quedan abiertos, sin
+ninguna autenticación, en cualquier entorno que no sea producción. Lo único que lo
+impide es `ENVIRONMENT=production`; quien despliegue fuera de producción debe
+configurar `API_KEYS` si la API es alcanzable desde una red no confiable.
+
 ## Consecuencias
 
 - El log anota el nombre del cliente, no la clave (trazabilidad sin riesgo de exposición).
@@ -31,3 +36,5 @@ facilitar el desarrollo local. En producción una `API_KEYS` vacía impide arran
 - Revocar a un cliente es quitar su entrada de `API_KEYS` en Render, lo que reinicia el
   servicio.
 - Con múltiples procesos, cada uno valida de forma independiente.
+- La seguridad fuera de producción depende de una variable de entorno: un despliegue
+  sin `ENVIRONMENT=production` y sin `API_KEYS` expone la API. El README lo documenta.

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HR Assistant - Tablero</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      max-width: 820px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      color: #222;
+    }
+    h1 { font-size: 1.5rem; }
+    input { padding: 0.5rem; width: 20rem; max-width: 100%; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { border: 1px solid #ccc; padding: 0.4rem 0.6rem; text-align: left; }
+    th { background: #f4f4f4; width: 40%; }
+    .status { margin-top: 0.75rem; color: #555; }
+    .status.error { color: #b00020; }
+    .bad { color: #b00020; }
+    .good { color: #1b7f3b; }
+  </style>
+</head>
+<body>
+  <h1>Tablero del HR Assistant</h1>
+  <p>Escribe la clave de acceso para ver las cifras de este proceso.</p>
+  <input id="api-key" data-testid="api-key" type="password"
+         placeholder="Clave de acceso" autocomplete="off">
+  <div id="status" class="status" data-testid="status"></div>
+  <table>
+    <tr><th>Peticiones (requests)</th>
+        <td id="requests" data-testid="requests">-</td></tr>
+    <tr><th>Tasa de error (error_rate)</th>
+        <td id="error-rate" data-testid="error-rate">-</td></tr>
+    <tr><th>Latencia p50 (ms)</th><td id="p50" data-testid="p50">-</td></tr>
+    <tr><th>Latencia p95 (ms) contra el SLO</th>
+        <td id="p95" data-testid="p95">-</td></tr>
+    <tr><th>Costo acumulado (USD)</th>
+        <td id="cost" data-testid="cost">-</td></tr>
+    <tr><th>Costo promedio por petición (USD)</th>
+        <td id="cost-avg" data-testid="cost-avg">-</td></tr>
+    <tr><th>Rutas de modelo</th>
+        <td id="model-routes" data-testid="model-routes">-</td></tr>
+    <tr><th>Llamadas con caché (cache_hit_pct)</th>
+        <td id="cache" data-testid="cache">-</td></tr>
+    <tr><th>Datos personales por tipo (pii_by_type)</th>
+        <td id="pii" data-testid="pii">-</td></tr>
+  </table>
+  <script>
+    const KEY_STORAGE_NAME = "hr-assistant-api-key";
+    const POLL_MS = 5000;
+    const EMPTY = "-";
+    const keyInput = document.getElementById("api-key");
+    const status = document.getElementById("status");
+
+    // La clave vive solo en sessionStorage, la misma de la página principal.
+    keyInput.value = sessionStorage.getItem(KEY_STORAGE_NAME) || "";
+
+    function setText(id, text) {
+      document.getElementById(id).textContent = text;
+    }
+
+    // Convierte un objeto nombre -> número en "nombre: número, ...".
+    function pairs(object) {
+      const entries = Object.entries(object || {});
+      return entries.length
+        ? entries.map(([name, value]) => name + ": " + value).join(", ")
+        : "ninguna";
+    }
+
+    // Sin clave válida no queda ninguna cifra en la página.
+    function clearFigures(message, isError) {
+      for (const id of ["requests", "error-rate", "p50", "p95", "cost",
+                        "cost-avg", "model-routes", "cache", "pii"]) {
+        setText(id, EMPTY);
+      }
+      status.textContent = message;
+      status.className = isError ? "status error" : "status";
+    }
+
+    function showFigures(data) {
+      const slo = data.slo || {};
+      const latency = data.latency_ms || {};
+      setText("requests", String(data.requests));
+      setText("error-rate", (data.error_rate * 100).toFixed(2) + " %");
+      setText("p50", String(latency.p50));
+      setText("p95", latency.p95 + " de " + slo.p95_ms_target +
+        (slo.met ? " (cumple)" : " (no cumple)"));
+      setText("cost", Number(data.cost_usd).toFixed(6));
+      setText("cost-avg", Number(data.cost_per_request_usd || 0).toFixed(6));
+      setText("model-routes", pairs(data.model_routes));
+      setText("cache", Number(data.cache_hit_pct || 0).toFixed(1) + " % (" +
+        (data.cached_calls || 0) + " llamadas)");
+      setText("pii", pairs(data.pii_by_type));
+      status.textContent = "Proceso " + data.pid + ", se actualiza cada 5 s";
+      status.className = "status";
+    }
+
+    async function refresh() {
+      const key = keyInput.value.trim();
+      if (!key) {
+        clearFigures("Falta la clave de acceso.", false);
+        return;
+      }
+      try {
+        const response = await fetch("/metrics", {
+          headers: { "X-API-Key": key },
+        });
+        if (response.status === 401) {
+          clearFigures("Clave inválida", true);
+          return;
+        }
+        if (!response.ok) {
+          clearFigures("No se pudieron leer las métricas.", true);
+          return;
+        }
+        showFigures(await response.json());
+      } catch (error) {
+        clearFigures("No se pudo conectar con el servidor.", true);
+      }
+    }
+
+    keyInput.addEventListener("input", () => {
+      sessionStorage.setItem(KEY_STORAGE_NAME, keyInput.value.trim());
+      refresh();
+    });
+    refresh();
+    setInterval(refresh, POLL_MS);
+  </script>
+</body>
+</html>

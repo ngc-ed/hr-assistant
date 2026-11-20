@@ -1,6 +1,6 @@
 # 0006. Trazas opcionales en LangSmith, apagadas y ocultas por omisión
 
-Estado: propuesto
+Estado: aceptado
 
 ## Contexto
 

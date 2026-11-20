@@ -16,16 +16,12 @@ class JsonLogger:
     :type clock: Clock
     :param stream: Flujo de salida; si es ``None`` se usa ``sys.stdout`` al escribir
     :type stream: TextIO | None
-    :param client: Nombre del cliente (opcional, para auditoría)
-    :type client: str | None
     """
 
-    def __init__(self, service: str, clock: Clock, stream: TextIO | None = None,
-                 client: str | None = None):
+    def __init__(self, service: str, clock: Clock, stream: TextIO | None = None):
         self._service = service
         self._clock = clock
         self._stream = stream
-        self._client = client
 
     def log(self, event: str, request_id: str, client: str | None = None,
             **fields: Any) -> None:

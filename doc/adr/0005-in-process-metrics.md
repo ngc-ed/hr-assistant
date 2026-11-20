@@ -1,6 +1,10 @@
 # 0005. Métricas en memoria por proceso
 
-Estado: propuesto
+Estado: aceptado
+
+Ampliado por ADR 0013 y 0014: la métrica `pii_by_type` (ADR 0013) y los rechazos de
+salida (ADR 0014) se suman a las métricas de negocio del proceso, con el mismo modelo
+en memoria.
 
 ## Contexto
 

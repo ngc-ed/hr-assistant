@@ -33,28 +33,43 @@ class Tracing:
             )
 
     @contextmanager
-    def context(self, request_id: str, client: str | None = None) -> Iterator[None]:
+    def context(
+        self,
+        request_id: str,
+        client: str | None = None,
+        route: str | None = None,
+        model: str | None = None,
+    ) -> Iterator[dict]:
         """Contexto de trazas de una petición.
 
         Apagado, fija ``enabled=False`` para no depender de variables del entorno.
-        Encendido, usa el cliente único y pone el ``request_id`` y, si hay, el
-        nombre del cliente en los metadatos (nunca su clave).
+        Encendido, usa el cliente único y pone ``request_id``, ``client``,
+        ``route`` y ``model`` en los metadatos (nunca la clave ni el texto de la
+        conversación). Devuelve el diccionario de metadatos para que quien llama
+        agregue ``cost_usd`` al terminar la corrida, cuando ya se conoce.
 
         :param request_id: Id de la petición
         :type request_id: str
         :param client: Nombre del cliente autenticado (opcional)
         :type client: str | None
-        :return: Un contexto sin valor
-        :rtype: Iterator[None]
+        :param route: Motivo de la ruta de modelo elegida (opcional)
+        :type route: str | None
+        :param model: Modelo elegido (opcional)
+        :type model: str | None
+        :return: Los metadatos de la traza (vacíos si las trazas están apagadas)
+        :rtype: Iterator[dict]
         """
         if not self.enabled:
             with langsmith.tracing_context(enabled=False):
-                yield
+                yield {}
             return
-        metadata = {"request_id": request_id}
-        if client:
-            metadata["client"] = client
+        metadata = {
+            "request_id": request_id,
+            "client": client or "anonymous",
+            "route": route or "unknown",
+            "model": model or "unknown",
+        }
         with langsmith.tracing_context(
             enabled=True, client=self._client, metadata=metadata
         ):
-            yield
+            yield metadata

@@ -2,6 +2,8 @@
 
 import json
 import re
+import time
+from collections.abc import Callable
 from typing import Protocol
 
 from app.completion import Completion
@@ -105,7 +107,9 @@ class FakeModel:
 
 
 def build_models(
-    settings: Settings, directory: EmployeeDirectory
+    settings: Settings,
+    directory: EmployeeDirectory,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, LanguageModel]:
     """Crea un modelo por nombre configurado (``MODEL_SMALL`` y ``MODEL_LARGE``).
 
@@ -116,6 +120,8 @@ def build_models(
     :type settings: Settings
     :param directory: Directorio de empleados (para conocer los departamentos)
     :type directory: EmployeeDirectory
+    :param sleep: Espera para los reintentos del gateway (inyectable en pruebas)
+    :type sleep: Callable[[float], None]
     :return: Los modelos por nombre
     :rtype: dict[str, LanguageModel]
     :raises ValueError: Si el proveedor no está soportado
@@ -126,5 +132,7 @@ def build_models(
         return {name: FakeModel(departments, name=name) for name in names}
     if settings.model_provider == GATEWAY_PROVIDER:
         client = create_http_client()
-        return {name: GatewayModel(name, settings, client) for name in names}
+        return {
+            name: GatewayModel(name, settings, client, sleep=sleep) for name in names
+        }
     raise ValueError(f"MODEL_PROVIDER {settings.model_provider!r} is not supported")

@@ -1,6 +1,9 @@
 # 0004. Id por petición y log JSON sin datos personales
 
-Estado: propuesto
+Estado: aceptado
+
+Ampliado por ADR 0013 y 0014: agregan los eventos `pii_detected` y `output_rejected`,
+que guardan conteos y motivo, nunca el valor.
 
 ## Contexto
 

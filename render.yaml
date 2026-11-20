@@ -12,6 +12,9 @@ services:
         value: production
       - key: MODEL_PROVIDER
         value: gateway
+      # Workers de uvicorn; /metrics y el límite de peticiones son por proceso
+      - key: WEB_CONCURRENCY
+        value: "2"
       - key: HIDE_INPUTS
         value: "true"
       - key: HIDE_OUTPUTS
