@@ -4,12 +4,20 @@ Devuelve solo el motivo del rechazo; el texto rechazado nunca se registra.
 """
 
 import re
+from collections.abc import Sequence
 
 from app.directory import EmployeeDirectory
 from app.pii import mask_pii
 
 EMPLOYEE_ID = re.compile(r"\bEMP-\d{4}\b", re.IGNORECASE)
 SAFE_ANSWER = "No pude generar una respuesta segura. Intenta de nuevo."
+NO_TOOL_DATA = "no_tool_data"
+NO_DATA_ANSWER = (
+    "No encontré datos para responder. "
+    "Solo atiendo preguntas de Recursos Humanos. "
+    "Pregunta por un id de empleado como EMP-0001 o por un departamento."
+)
+TOOL_NAMES = ("get_employee", "search_by_department")
 RANDOM_RUN_MIN_CHARS = 32
 SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
@@ -65,6 +73,22 @@ def _has_invented_id(
     )
 
 
+def _lacks_tool_data(answer: str, tools_used: Sequence[str] | None) -> bool:
+    """Indica si la respuesta no se apoya en una herramienta.
+
+    :param answer: Respuesta a revisar
+    :type answer: str
+    :param tools_used: Herramientas usadas; ``None`` desactiva la revisión
+    :type tools_used: Sequence[str] | None
+    :return: ``True`` si no hubo herramientas o la respuesta nombra una
+    :rtype: bool
+    """
+    if tools_used is None:
+        return False
+    lowered = answer.lower()
+    return not tools_used or any(name in lowered for name in TOOL_NAMES)
+
+
 def asked_ids(*texts: str) -> frozenset[str]:
     """Junta los ids ``EMP-xxxx`` que aparecen en los textos de la persona.
 
@@ -83,6 +107,7 @@ def rejection_reason(
     max_chars: int,
     directory: EmployeeDirectory | None = None,
     asked: frozenset[str] = frozenset(),
+    tools_used: Sequence[str] | None = None,
 ) -> str | None:
     """Valida una respuesta.
 
@@ -94,20 +119,22 @@ def rejection_reason(
     :type directory: EmployeeDirectory | None
     :param asked: Ids que la persona ya nombró en su pregunta
     :type asked: frozenset[str]
+    :param tools_used: Herramientas que usó el agente; si es ``None`` no se
+        comprueba que haya datos de herramienta
+    :type tools_used: Sequence[str] | None
     :return: ``None`` si es válida; si no, ``empty``, ``too_long``, ``pii``,
-        ``secret`` o ``invented_id``
+        ``secret``, ``invented_id`` o ``no_tool_data``
     :rtype: str | None
     """
-    if not answer.strip():
-        return "empty"
-    if len(answer) > max_chars:
-        return "too_long"
-    if mask_pii(answer)[1]:
-        return "pii"
-    if _has_secret(answer):
-        return "secret"
-    if directory is not None and _has_invented_id(
-        answer, directory, asked
-    ):
-        return "invented_id"
-    return None
+    checks = (
+        ("empty", not answer.strip()),
+        ("too_long", len(answer) > max_chars),
+        ("pii", bool(mask_pii(answer)[1])),
+        ("secret", _has_secret(answer)),
+        (
+            "invented_id",
+            directory is not None and _has_invented_id(answer, directory, asked),
+        ),
+        (NO_TOOL_DATA, _lacks_tool_data(answer, tools_used)),
+    )
+    return next((reason for reason, failed in checks if failed), None)

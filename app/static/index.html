@@ -125,16 +125,22 @@
     }
 
     // En errores, el id viene en el cuerpo o, si no, en el encabezado X-Request-ID.
-    async function errorRequestId(response) {
+    async function readErrorBody(response) {
       try {
-        const body = await response.json();
-        if (body && body.request_id) {
-          return body.request_id;
-        }
+        return (await response.json()) || {};
       } catch (error) {
         // El cuerpo no era JSON: se usa el encabezado.
+        return {};
       }
-      return response.headers.get("X-Request-ID");
+    }
+
+    // Con un 400 muestra el detail del servidor; con otro estado, el mensaje fijo.
+    function errorText(response, body) {
+      const detail = body.detail;
+      if (response.status === 400 && typeof detail === "string" && detail) {
+        return detail;
+      }
+      return statusMessage(response);
     }
 
     form.addEventListener("submit", async (event) => {
@@ -157,8 +163,11 @@
           body: JSON.stringify({ question: question, history: history }),
         });
         if (!response.ok) {
-          addError(statusMessage(response));
-          addRequestId(await errorRequestId(response));
+          const errorBody = await readErrorBody(response);
+          addError(errorText(response, errorBody));
+          addRequestId(
+            errorBody.request_id || response.headers.get("X-Request-ID")
+          );
           return;
         }
         const data = await response.json();

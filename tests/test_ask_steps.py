@@ -91,7 +91,8 @@ def model_never_saw(context, spy_model, text):
     first_call = spy_model.calls[0]
     assert first_call[0]["role"] == "system", "falta el prompt del especialista"
     assert first_call[1]["content"] == text, "la API no usó el historial"
-    first_request_calls = 2
+    # The code runs the tool first, so the first request makes one model call.
+    first_request_calls = 1
     later_calls = spy_model.calls[first_request_calls:]
     assert later_calls, "el modelo no recibió la segunda pregunta"
     for messages in later_calls:

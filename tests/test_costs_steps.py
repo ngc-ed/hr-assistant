@@ -152,7 +152,9 @@ def first_call_messages(context, count):
     assert len(first_call) == count
     assert first_call[0]["role"] == "system"
     assert first_call[1]["content"] == "mensaje 4"
-    assert first_call[-1]["content"] == "¿Quién es EMP-0004?"
+    # System prompt, 6 history messages, the question and the tool result.
+    assert first_call[-2]["content"] == "¿Quién es EMP-0004?"
+    assert first_call[-1]["content"].startswith("Resultado de la herramienta: ")
 
 
 @then(

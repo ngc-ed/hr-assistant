@@ -4,6 +4,7 @@ Las pruebas no levantan servidor ni usan red: arman la app con ``create_app()`` 
 le inyectan sus dependencias.
 """
 
+import io
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -184,6 +185,50 @@ def scenario_client(make_client, fixed_clock):
         return context["client"]
 
     return _client
+
+
+EMPLOYEE_TOOL = {"tool": "get_employee", "args": {"employee_id": "EMP-0004"}}
+ID_QUESTION = "¿Quién es EMP-0004?"
+DEPARTMENT_QUESTION = "¿Quién trabaja en Tecnología?"
+UNCLEAR_QUESTION = "Cuéntame algo interesante"
+
+
+def reply(payload):
+    """Serializa una respuesta de guion como el JSON que espera el agente."""
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def answer(text):
+    """Una respuesta final de guion."""
+    return reply({"answer": text})
+
+
+def ask(client, question):
+    """Hace ``POST /ask`` con una pregunta."""
+    return client.post("/ask", json={"question": question})
+
+
+@pytest.fixture
+def setup(make_client, scripted_model, log_lines):
+    """Arma ``(client, model, events)`` con un modelo de guion y un log en memoria.
+
+    ``events()`` devuelve las líneas del log ya parseadas, con filtro opcional
+    por nombre de evento.
+    """
+
+    def _build(script):
+        model = scripted_model(script)
+        log = io.StringIO()
+        client = make_client(model=model, log_stream=log)
+
+        def events(name=None):
+            return [row for row in log_lines(log) if name in (None, row["event"])]
+
+        events.raw = log.getvalue
+        events.stream = log
+        return client, model, events
+
+    return _build
 
 
 @pytest.fixture

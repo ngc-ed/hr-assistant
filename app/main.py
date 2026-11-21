@@ -7,7 +7,7 @@ Seguro y con límites de peticiones (sesión 4).
 import os
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TextIO
@@ -29,11 +29,17 @@ from app.lifecycle import exit_with_parent
 from app.llm import LanguageModel, build_models
 from app.logs import JsonLogger
 from app.metrics import Metrics
-from app.output_guard import SAFE_ANSWER, asked_ids, rejection_reason
+from app.output_guard import (
+    NO_DATA_ANSWER,
+    NO_TOOL_DATA,
+    SAFE_ANSWER,
+    asked_ids,
+    rejection_reason,
+)
 from app.pii import mask_pii
 from app.rate_limiter import RateLimiter
 from app.specialists import EMPLOYEE, build_specialist
-from app.supervisor import METHOD_RULES, Supervisor
+from app.supervisor import METHOD_RULES, Decision, Supervisor
 from app.tracing import Tracing
 
 PRODUCT_ROOT = Path(__file__).resolve().parent.parent
@@ -461,6 +467,7 @@ def _safe_answer(  # pylint: disable=too-many-arguments,too-many-positional-argu
     request_id: str,
     client: str | None = None,
     asked: frozenset[str] = frozenset(),
+    tools_used: Sequence[str] | None = None,
 ) -> str:
     """Revisor: enmascara y valida la respuesta; si no es segura, da el mensaje fijo.
 
@@ -478,19 +485,23 @@ def _safe_answer(  # pylint: disable=too-many-arguments,too-many-positional-argu
     :type client: str | None
     :param asked: Ids ``EMP-xxxx`` que la persona nombró en la conversación
     :type asked: frozenset[str]
-    :return: La respuesta enmascarada o el mensaje seguro
+    :param tools_used: Herramientas que usó el agente
+    :type tools_used: Sequence[str] | None
+    :return: La respuesta enmascarada, el mensaje de sin datos o el mensaje seguro
     :rtype: str
     """
     masked, counts = mask_pii(answer)
     _log_pii(observability.logger, request_id, counts, "output", client)
-    reason = rejection_reason(masked, settings.max_answer_chars, directory, asked)
+    reason = rejection_reason(
+        masked, settings.max_answer_chars, directory, asked, tools_used
+    )
     if reason is None:
         return masked
     # Solo el motivo: el texto rechazado nunca va al log.
     observability.logger.log(
         "output_rejected", request_id, client=client, reason=reason
     )
-    return SAFE_ANSWER
+    return NO_DATA_ANSWER if reason == NO_TOOL_DATA else SAFE_ANSWER
 
 
 def _tool_department(
@@ -512,6 +523,19 @@ def _tool_department(
     if tool == "get_employee":
         employee = directory.get_employee(str(args.get("employee_id", "")))
         return employee.get("department") if employee else None
+    return None
+
+
+def _preset_tool(decision: Decision) -> tuple[str, dict] | None:
+    """Da la herramienta que el código llama antes del modelo.
+
+    :param decision: Decisión del supervisor
+    :type decision: Decision
+    :return: Herramienta y argumentos si decidieron las reglas; si no, ``None``
+    :rtype: tuple[str, dict] | None
+    """
+    if decision.method == METHOD_RULES and decision.tool:
+        return decision.tool, decision.tool_args
     return None
 
 
@@ -580,7 +604,13 @@ def _run_agent(
         request_id, client, route=route.reason, model=route.model
     ) as trace_metadata:
         with observability.tracing.stage(f"agent.{decision.specialist}"):
-            result = agent.run(body.question, history, on_tool_call=audit)
+            # Con reglas el código ya conoce el dato: llama la herramienta él.
+            result = agent.run(
+                body.question,
+                history,
+                on_tool_call=audit,
+                preset_tool=_preset_tool(decision),
+            )
         cost_usd = assistant.prices.cost_usd(
             route.model, result.billable_input_tokens, result.billable_output_tokens
         )
@@ -700,6 +730,7 @@ def _register_routes(
                 request_id,
                 client,
                 asked_ids(body.question),
+                result.tools_used,
             )
         return AskResponse(
             answer=answer,

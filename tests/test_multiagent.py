@@ -4,60 +4,21 @@ Stages: guard, supervisor, specialist and reviewer. Every test goes through
 ``create_app()`` with injected dependencies, so no network and no real model.
 """
 
-import io
-import json
 from pathlib import Path
 
 import langsmith
 import pytest
+from conftest import DEPARTMENT_QUESTION, EMPLOYEE_TOOL, ID_QUESTION, UNCLEAR_QUESTION
+from conftest import answer as _answer
+from conftest import ask as _ask
+from conftest import reply as _reply
 
 from app.config import load_settings
 from app.output_guard import SAFE_ANSWER
 
 PRODUCT_ROOT = Path(__file__).resolve().parent.parent
 BLOCKED_MESSAGE = "La pregunta no se puede procesar."
-EMPLOYEE_TOOL = {"tool": "get_employee", "args": {"employee_id": "EMP-0004"}}
 DEPARTMENT_TOOL = {"tool": "search_by_department", "args": {"department": "Ventas"}}
-ID_QUESTION = "¿Quién es EMP-0004?"
-DEPARTMENT_QUESTION = "¿Quién trabaja en Tecnología?"
-UNCLEAR_QUESTION = "Cuéntame algo interesante"
-
-
-def _reply(payload):
-    """Serialize a scripted model reply as the JSON text the agent expects."""
-    return json.dumps(payload, ensure_ascii=False)
-
-
-def _answer(text):
-    """A scripted final answer."""
-    return _reply({"answer": text})
-
-
-@pytest.fixture
-def setup(make_client, scripted_model, log_lines):
-    """Build ``(client, model, events)`` for a scripted model and an in-memory log.
-
-    ``events()`` returns the parsed log lines, optionally filtered by event name.
-    """
-
-    def _build(script):
-        model = scripted_model(script)
-        log = io.StringIO()
-        client = make_client(model=model, log_stream=log)
-
-        def events(name=None):
-            lines = log_lines(log)
-            return [line for line in lines if name in (None, line["event"])]
-
-        events.raw = log.getvalue
-        events.stream = log
-        return client, model, events
-
-    return _build
-
-
-def _ask(client, question):
-    return client.post("/ask", json={"question": question})
 
 
 # --- Guard -----------------------------------------------------------------
@@ -167,21 +128,32 @@ def test_odd_model_choice_falls_back_to_the_employee_specialist(setup):
 
 
 @pytest.mark.parametrize(
-    "question, foreign_tool, specialist",
+    "question, choice, foreign_tool, own_tools",
     [
-        (ID_QUESTION, DEPARTMENT_TOOL, "employee"),
-        ("¿Quién trabaja en Ventas?", EMPLOYEE_TOOL, "department"),
+        (UNCLEAR_QUESTION, ["employee"], DEPARTMENT_TOOL, []),
+        (UNCLEAR_QUESTION, ["department"], EMPLOYEE_TOOL, []),
+        (ID_QUESTION, [], DEPARTMENT_TOOL, ["get_employee"]),
+        ("¿Quién trabaja en Ventas?", [], EMPLOYEE_TOOL, ["search_by_department"]),
     ],
-    ids=["employee_cannot_search_department", "department_cannot_get_employee"],
+    ids=[
+        "model_employee_cannot_search_department",
+        "model_department_cannot_get_employee",
+        "rules_employee_cannot_search_department",
+        "rules_department_cannot_get_employee",
+    ],
 )
 def test_a_specialist_cannot_run_the_other_ones_tool(
-    setup, question, foreign_tool, specialist
+    setup, question, choice, foreign_tool, own_tools
 ):
-    client, _, events = setup([_reply(foreign_tool), _answer("No puedo.")])
+    # With rules the code already ran the specialist's own tool; the model then
+    # asks for the foreign one, which must never run.
+    client, _, events = setup([*choice, _reply(foreign_tool), _answer("No puedo.")])
     body = _ask(client, question).json()
-    assert body["specialist"] == specialist
-    assert body["tools_used"] == []
-    assert not events("audit")
+    # The foreign tool belongs to the other specialist.
+    expected = "department" if foreign_tool is EMPLOYEE_TOOL else "employee"
+    assert body["specialist"] == expected
+    assert body["tools_used"] == own_tools
+    assert [row["tool"] for row in events("audit")] == own_tools
 
 
 def test_each_specialist_uses_its_own_prompt(setup):
@@ -257,8 +229,9 @@ def test_ask_reports_the_specialist_and_the_four_stages(
 
 def test_audit_arguments_are_masked(setup):
     call = {"tool": "get_employee", "args": {"employee_id": "ana@example.com"}}
-    client, _, events = setup([_reply(call), _answer("No existe.")])
-    _ask(client, ID_QUESTION)
+    # The model decides the specialist, so the model also chooses the argument.
+    client, _, events = setup(["employee", _reply(call), _answer("No existe.")])
+    _ask(client, UNCLEAR_QUESTION)
     audit = events("audit")
     assert audit[0]["args"] == {"employee_id": "[CORREO]"}
     assert "ana@example.com" not in events.raw()

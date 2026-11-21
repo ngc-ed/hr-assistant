@@ -23,6 +23,8 @@ TOOL_RESULT_PREFIX = "Resultado de la herramienta: "
 HELP_ANSWER = "Pregúntame por un empleado (EMP-0001) o un departamento."
 EMPLOYEE_ID_PATTERN = re.compile(r"EMP-\d{4}", re.IGNORECASE)
 FAKE_PROVIDER = "fake"
+NO_TOOLS_MODE = "no_tools"
+NO_TOOLS_TEXT = "Necesito utilizar la herramienta {tool} para responder."
 
 
 class LanguageModel(Protocol):
@@ -59,11 +61,17 @@ class FakeModel:
     :type departments: list[str]
     :param name: Nombre del modelo (para buscar su precio)
     :type name: str
+    :param mode: ``no_tools`` nunca pide herramientas y responde con texto que
+        las menciona (reproduce el error de producción); vacío: normal
+    :type mode: str
     """
 
-    def __init__(self, departments: list[str], name: str = FAKE_PROVIDER):
+    def __init__(
+        self, departments: list[str], name: str = FAKE_PROVIDER, mode: str = ""
+    ):
         self._departments = tuple(departments)
         self.name = name
+        self._mode = mode
 
     def complete(self, messages: list[dict]) -> Completion:
         """Decide con reglas sobre el último mensaje.
@@ -95,10 +103,15 @@ class FakeModel:
         match = EMPLOYEE_ID_PATTERN.search(last)
         if match:
             employee_id = match.group(0).upper()
+            if self._mode == NO_TOOLS_MODE:
+                return {"answer": NO_TOOLS_TEXT.format(tool="get_employee")}
             return {"tool": "get_employee", "args": {"employee_id": employee_id}}
         lowered = last.casefold()
         for department in self._departments:
             if department.casefold() in lowered:
+                if self._mode == NO_TOOLS_MODE:
+                    tool = "search_by_department"
+                    return {"answer": NO_TOOLS_TEXT.format(tool=tool)}
                 return {
                     "tool": "search_by_department",
                     "args": {"department": department},
@@ -129,7 +142,10 @@ def build_models(
     names = (settings.model_small, settings.model_large)
     if settings.model_provider == FAKE_PROVIDER:
         departments = directory.departments()
-        return {name: FakeModel(departments, name=name) for name in names}
+        mode = settings.fake_model_mode
+        return {
+            name: FakeModel(departments, name=name, mode=mode) for name in names
+        }
     if settings.model_provider == GATEWAY_PROVIDER:
         client = create_http_client()
         return {

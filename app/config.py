@@ -93,6 +93,9 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     :type model_max_retries: int
     :param max_answer_chars: Largo máximo de una respuesta válida
     :type max_answer_chars: int
+    :param fake_model_mode: Modo del modelo simulado (``no_tools``); solo para
+        pruebas y solo se lee con ``MODEL_PROVIDER=fake``
+    :type fake_model_mode: str
     """
 
     model_provider: str = DEFAULT_MODEL_PROVIDER
@@ -123,6 +126,7 @@ class Settings:  # pylint: disable=too-many-instance-attributes
     langsmith_api_key: str = field(default="", repr=False)
     model_max_retries: int = DEFAULT_MODEL_MAX_RETRIES
     max_answer_chars: int = DEFAULT_MAX_ANSWER_CHARS
+    fake_model_mode: str = ""
 
 
 def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -407,6 +411,12 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         "langsmith_api_key": langsmith_key,
         "max_answer_chars": _positive_int(
             env, "MAX_ANSWER_CHARS", DEFAULT_MAX_ANSWER_CHARS
+        ),
+        # Solo se lee con el proveedor simulado; con otro se ignora.
+        "fake_model_mode": (
+            (env.get("FAKE_MODEL_MODE") or "").strip().lower()
+            if provider == "fake"
+            else ""
         ),
     }
 

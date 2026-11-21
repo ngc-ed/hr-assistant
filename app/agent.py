@@ -115,6 +115,7 @@ class Agent:
         question: str,
         history: list[dict],
         on_tool_call: ToolCallback | None = None,
+        preset_tool: tuple[str, dict] | None = None,
     ) -> AgentResult:
         """Responde una pregunta usando el historial que manda el cliente.
 
@@ -125,6 +126,10 @@ class Agent:
         :param on_tool_call: Se llama con nombre y argumentos de cada herramienta
             que sí se ejecuta (para auditoría); opcional
         :type on_tool_call: Callable[[str, dict], None] | None
+        :param preset_tool: Herramienta y argumentos que el código ya decidió; se
+            ejecuta antes del primer ``model_call`` y su resultado llega al modelo
+            como ``Resultado de la herramienta: ...``; opcional
+        :type preset_tool: tuple[str, dict] | None
         :return: La respuesta y sus métricas
         :rtype: AgentResult
         """
@@ -138,13 +143,23 @@ class Agent:
         result = AgentResult(
             answer=STEP_CAP_ANSWER, steps=self._max_steps, stopped=True
         )
-        for step in range(1, self._max_steps + 1):
+        tool_steps = 0
+        if preset_tool is not None:
+            name, args = preset_tool
+            call = {"tool": name, "args": args}
+            tool_output = self._execute(call, result.tools_used, on_tool_call)
+            messages.append(
+                {"role": "user", "content": TOOL_RESULT_PREFIX + tool_output}
+            )
+            # La llamada de la herramienta cuenta como una vuelta del tope.
+            tool_steps = 1
+        for step in range(1, self._max_steps - tool_steps + 1):
             completion = self._call_model(messages)
             result.add_usage(completion)
             reply = _parse_reply(completion.text)
             if reply is not None and isinstance(reply.get("answer"), str):
                 result.answer = reply["answer"]
-                result.steps = step
+                result.steps = step + tool_steps
                 result.stopped = False
                 return result
             tool_output = self._execute(reply, result.tools_used, on_tool_call)

@@ -24,10 +24,10 @@ Feature: Ask the HR assistant about employees
     And the answer mentions "Sofía Gómez"
     And the tools used are "search_by_department"
 
-  Scenario: A question without an id or department gets the help answer
+  Scenario: A question without an id or department gets the no-data answer
     When I ask "Hola, ¿cómo estás?"
     Then the response status is 200
-    And the answer mentions "Pregúntame por un empleado"
+    And the answer is "No encontré datos para responder. Solo atiendo preguntas de Recursos Humanos. Pregunta por un id de empleado como EMP-0001 o por un departamento."
     And the number of steps is 1
 
   Scenario: A blank question is rejected
@@ -46,7 +46,7 @@ Feature: Ask the HR assistant about employees
 
   Scenario: The step cap stops the loop with the exact message
     Given the agent is limited to 1 step
-    When I ask "¿Quién es EMP-0004?"
+    When I ask "¿Quién es EMP-00045?"
     Then the response status is 200
     And the answer is "No pude completar la respuesta. Intenta con una pregunta más concreta."
     And the number of steps is 1
